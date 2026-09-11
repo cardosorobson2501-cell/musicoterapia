@@ -12,6 +12,13 @@ export const metadata: Metadata = {
     title: 'Musicoterapia',
     statusBarStyle: 'default',
   },
+  icons: {
+    icon: [
+      { url: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { url: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+    ],
+    apple: [{ url: '/icons/apple-touch-icon.png', sizes: '180x180' }],
+  },
   // Dado de saúde não deve ser indexado em hipótese alguma.
   robots: { index: false, follow: false },
 }
