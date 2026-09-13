@@ -10,6 +10,7 @@ import {
   useSessionRecords,
 } from '@/lib/db/queries'
 import { useTherapistProfile } from '@/lib/db/therapist'
+import { useProntuarioLayout } from '@/lib/db/preferences'
 import { patchSession } from '@/lib/domain/session'
 import { buildProntuarioText } from '@/lib/domain/prontuario-text'
 import {
@@ -31,6 +32,7 @@ export default function SendPage({
   const records = useSessionRecords(id)
   const institutions = useInstitutions()
   const therapist = useTherapistProfile()
+  const layout = useProntuarioLayout()
 
   const [toast, setToast] = useState<string | null>(null)
   const [view, setView] = useState<'whatsapp' | 'full'>('whatsapp')
@@ -41,10 +43,10 @@ export default function SendPage({
     if (!session || !patient || !records) return null
     const base = { session, patient, records, institution, therapist }
     return {
-      whatsapp: buildProntuarioText(base, 'whatsapp'),
-      full: buildProntuarioText(base, 'full'),
+      whatsapp: buildProntuarioText(base, 'whatsapp', layout),
+      full: buildProntuarioText(base, 'full', layout),
     }
-  }, [session, patient, records, institution, therapist])
+  }, [session, patient, records, institution, therapist, layout])
 
   if (session === undefined || !texts) return <Spinner />
   if (session === null || patient === null) {

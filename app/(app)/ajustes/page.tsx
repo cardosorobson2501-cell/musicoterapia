@@ -9,14 +9,17 @@ import {
   useTherapistProfile,
   saveTherapistProfile,
 } from '@/lib/db/therapist'
+import { useProntuarioLayout, setProntuarioLayout } from '@/lib/db/preferences'
 import { clearPin } from '@/lib/auth/pin'
 import type { Institution } from '@/lib/db/types'
+import type { ProntuarioLayout } from '@/lib/domain/prontuario-text'
 import {
   Button,
   Card,
   Field,
   Input,
   PageHeader,
+  Select,
   Spinner,
 } from '@/components/ui'
 import { SyncBadge, useSync } from '@/components/SyncProvider'
@@ -26,6 +29,7 @@ export default function SettingsPage() {
   const therapistId = useTherapistId()
   const institutions = useInstitutions()
   const profile = useTherapistProfile()
+  const prontuarioLayout = useProntuarioLayout()
   const { pending, lastSyncAt, error } = useSync()
   const [newName, setNewName] = useState('')
   const [newKind, setNewKind] = useState('')
@@ -90,6 +94,26 @@ export default function SettingsPage() {
               {profSaved ? 'Salvo' : 'Salvar dados'}
             </Button>
           </form>
+        </Card>
+      </section>
+
+      <section className="mb-6">
+        <SectionTitle>Formato do prontuário ao enviar</SectionTitle>
+        <Card>
+          <Field
+            label="Organização do texto"
+            hint="Vale para o WhatsApp e para a Clínica Ágil."
+          >
+            <Select
+              value={prontuarioLayout}
+              onChange={(e) =>
+                void setProntuarioLayout(e.target.value as ProntuarioLayout)
+              }
+            >
+              <option value="topics">Separado por tópicos</option>
+              <option value="paragraph">Texto corrido (um parágrafo)</option>
+            </Select>
+          </Field>
         </Card>
       </section>
 
