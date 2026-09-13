@@ -1,7 +1,7 @@
 'use client'
 
 import { db } from '@/lib/db/local'
-import { baseFields, save, now } from '@/lib/db/repo'
+import { baseFields, patch, save, now } from '@/lib/db/repo'
 import type {
   Activity,
   ActivityRecord,
@@ -84,24 +84,30 @@ export async function createSession(
   return save('sessions', session)
 }
 
-/** Grava uma alteração parcial no prontuário (autosave). */
+/**
+ * Grava uma alteração parcial no prontuário (autosave).
+ *
+ * Usa patch(), não save(): os blocos do prontuário salvam sozinhos e em
+ * paralelo, então a mesclagem precisa partir do estado mais recente no
+ * banco, não da cópia da sessão que este campo específico está segurando —
+ * senão o autosave de um campo apaga o que outro acabou de gravar.
+ */
 export async function patchSession(
   session: Session,
-  patch: Partial<Session>,
+  changes: Partial<Session>,
 ): Promise<Session> {
-  return save('sessions', { ...session, ...patch })
+  return patch('sessions', session.id, changes)
 }
 
 export async function finalizeSession(session: Session): Promise<Session> {
-  return save('sessions', {
-    ...session,
+  return patch<Session>('sessions', session.id, {
     status: 'final',
     end_time: session.end_time || nowTime(),
   })
 }
 
 export async function reopenSession(session: Session): Promise<Session> {
-  return save('sessions', { ...session, status: 'draft' })
+  return patch<Session>('sessions', session.id, { status: 'draft' })
 }
 
 /**
@@ -138,14 +144,25 @@ export async function ensureRecord(
   return save('activity_records', record)
 }
 
-/** Recalcula o percentual e grava. Chamado a cada toque de registro. */
-async function persistRecord(record: ActivityRecord): Promise<ActivityRecord> {
+/**
+ * Recalcula o percentual e grava. Chamado a cada toque de registro.
+ *
+ * Recebe só os campos alterados (`changes`), não o registro inteiro: a
+ * gravação (patch) mescla sobre o estado mais recente no banco, então as
+ * notas da atividade — que salvam sozinhas, em paralelo — não são apagadas
+ * por um toque no contador que partiu de uma cópia mais antiga do registro.
+ */
+async function persistRecord(
+  record: ActivityRecord,
+  changes: Partial<ActivityRecord>,
+): Promise<ActivityRecord> {
+  const merged = { ...record, ...changes }
   const computed_percent = computePercent(
-    record.measurement_type,
-    record.config_snapshot,
-    record,
+    merged.measurement_type,
+    merged.config_snapshot,
+    merged,
   )
-  return save('activity_records', { ...record, computed_percent })
+  return patch('activity_records', record.id, { ...changes, computed_percent })
 }
 
 export async function addTrial(
@@ -157,41 +174,41 @@ export async function addTrial(
     n: record.trials.length + 1,
     at: now(),
   }
-  return persistRecord({ ...record, trials: [...record.trials, next] })
+  return persistRecord(record, { trials: [...record.trials, next] })
 }
 
 export async function removeLastTrial(
   record: ActivityRecord,
 ): Promise<ActivityRecord> {
-  return persistRecord({ ...record, trials: record.trials.slice(0, -1) })
+  return persistRecord(record, { trials: record.trials.slice(0, -1) })
 }
 
 export async function setScore(
   record: ActivityRecord,
   score: number | null,
 ): Promise<ActivityRecord> {
-  return persistRecord({ ...record, score })
+  return persistRecord(record, { score })
 }
 
 export async function setCount(
   record: ActivityRecord,
   count_value: number,
 ): Promise<ActivityRecord> {
-  return persistRecord({ ...record, count_value: Math.max(0, count_value) })
+  return persistRecord(record, { count_value: Math.max(0, count_value) })
 }
 
 export async function setDuration(
   record: ActivityRecord,
   duration_seconds: number,
 ): Promise<ActivityRecord> {
-  return persistRecord({ ...record, duration_seconds })
+  return persistRecord(record, { duration_seconds })
 }
 
 export async function setRecordNotes(
   record: ActivityRecord,
   notes: string,
 ): Promise<ActivityRecord> {
-  return save('activity_records', { ...record, notes })
+  return patch<ActivityRecord>('activity_records', record.id, { notes })
 }
 
 /**

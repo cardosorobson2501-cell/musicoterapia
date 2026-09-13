@@ -13,6 +13,7 @@ import {
 import { db } from '@/lib/db/local'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useTherapistId } from '@/lib/auth/AuthProvider'
+import { remove } from '@/lib/db/repo'
 import {
   ensureRecord,
   finalizeSession,
@@ -230,6 +231,29 @@ export default function AttendancePage({
           onClose={() => setPicking(false)}
         />
       )}
+
+      <Button
+        variant="ghost"
+        full
+        className="mt-4 text-danger"
+        onClick={() => {
+          if (
+            confirm(
+              'Excluir este prontuário? O desempenho registrado nas atividades desta sessão também será apagado.',
+            )
+          ) {
+            void (async () => {
+              for (const r of records ?? []) {
+                await remove('activity_records', r.id)
+              }
+              await remove('sessions', session.id)
+              router.replace(`/pacientes/${session.patient_id}`)
+            })()
+          }
+        }}
+      >
+        Excluir prontuário
+      </Button>
     </>
   )
 }

@@ -37,6 +37,42 @@ export async function save<T extends SyncBase>(
 }
 
 /**
+ * Aplica um patch parcial sobre a versão mais atual da linha no banco.
+ *
+ * Diferente de save(), que sobrescreve a linha inteira com o que o chamador
+ * está segurando em memória, esta função busca o estado mais recente dentro
+ * da própria transação e mescla só os campos alterados. Isso importa porque
+ * vários campos autosave (ex.: os blocos do prontuário) podem terminar de
+ * gravar quase ao mesmo tempo, cada um com uma cópia da linha capturada em
+ * momentos diferentes — sem essa mesclagem, o último a gravar apagaria as
+ * mudanças dos outros.
+ */
+export async function patch<T extends SyncBase>(
+  table: SyncedTable,
+  id: string,
+  changes: Partial<T>,
+): Promise<T> {
+  const local = db()
+  return local.transaction('rw', local.table(table), local.outbox, async () => {
+    const current = (await local.table(table).get(id)) as T | undefined
+    const stamped = {
+      ...(current as T),
+      ...changes,
+      id,
+      updated_at: now(),
+    } as T
+    await local.table(table).put(stamped)
+    await local.outbox.put({
+      key: `${table}:${stamped.id}`,
+      table,
+      row_id: stamped.id,
+      queued_at: now(),
+    })
+    return stamped
+  })
+}
+
+/**
  * Exclusão lógica. A linha permanece no banco com deleted_at preenchido —
  * sem isso a remoção feita offline seria desfeita pela próxima sincronização.
  */

@@ -57,7 +57,12 @@ export function AutosaveField({
     timer.current = setTimeout(flush, 800)
   }
 
-  useEffect(() => () => flush(), []) // eslint-disable-line react-hooks/exhaustive-deps
+  // O efeito de desmontagem só roda uma vez, então precisa chamar sempre a
+  // versão mais recente de flush (via ref) — senão, ao sair da tela logo
+  // após digitar, ele usaria o "value"/"onSave" capturados lá no início.
+  const flushRef = useRef(flush)
+  flushRef.current = flush
+  useEffect(() => () => flushRef.current(), [])
 
   return (
     <Field label={label} hint={hint}>
