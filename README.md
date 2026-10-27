@@ -107,6 +107,27 @@ no app pode ser pedida direto do celular, sem precisar deste computador:
 3. Converse normalmente — cada alteração aprovada vira commit no repositório,
    e a Vercel publica sozinha em cerca de um minuto.
 
+## Notas coloridas (aba "Notas")
+
+Cada nota tocada no teclado vira uma bolinha colorida na tela: tocar Dó três
+vezes mostra três bolinhas vermelhas; Sol duas vezes, duas azuis. As cores
+seguem o arco-íris: Dó vermelho, Ré laranja, Mi amarelo, Fá verde, Sol azul,
+Lá roxo, Si rosa (sustenidos com tons intermediários).
+
+Três jeitos de mandar as notas:
+
+- **Teclado MIDI** (mais preciso): ligue o teclado pelo cabo USB (no celular,
+  com adaptador OTG) e toque em "Ligar". Funciona no Chrome/Edge do
+  computador e do Android. **Não funciona no iPhone** (o Safari não tem MIDI).
+- **Microfone**: para teclado sem cabo ou no iPhone. Toque uma nota de cada
+  vez; se estiver contando notas a mais ou a menos, ajuste a
+  "Sensibilidade". Funciona melhor em sala silenciosa e com o aparelho
+  perto do teclado.
+- **Teclado na tela**: para testar ou usar sem instrumento.
+
+O botão de tela cheia amplia as bolinhas para mostrar ao paciente.
+A lógica de cores e detecção de nota fica em `lib/domain/notes.ts`.
+
 ## Pontos que dependem de você
 
 - **Clínica Ágil:** ainda não sabemos se o sistema deles tem API. Enquanto
