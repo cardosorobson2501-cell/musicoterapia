@@ -80,3 +80,21 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Bolinha de nota surgindo na tela "Notas coloridas". */
+@keyframes note-pop {
+  0% {
+    transform: scale(0.2);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.note-pop {
+  animation: note-pop 260ms ease-out;
+}

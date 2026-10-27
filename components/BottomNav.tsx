@@ -6,6 +6,7 @@ import {
   CalendarDays,
   Users,
   ListMusic,
+  Music,
   Download,
   Settings,
 } from 'lucide-react'
@@ -19,6 +20,7 @@ const TABS = [
   { href: '/hoje', label: 'Hoje', icon: CalendarDays },
   { href: '/pacientes', label: 'Pacientes', icon: Users },
   { href: '/atividades', label: 'Atividades', icon: ListMusic },
+  { href: '/notas', label: 'Notas', icon: Music },
   { href: '/exportar', label: 'Exportar', icon: Download },
   { href: '/ajustes', label: 'Ajustes', icon: Settings },
 ]
