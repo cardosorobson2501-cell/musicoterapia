@@ -258,21 +258,136 @@ function detectPitch(buf, sampleRate, minRms) {
   return { frequency: sampleRate / (chosen + shift), rms };
 }
 
-// Conta uma nota quando ela fica estável alguns quadros; só conta de novo
-// depois de silêncio, troca de nota ou novo ataque (volume sobe de repente).
-function makeOnsetTracker(framesToConfirm = 3, attackRatio = 1.6) {
-  let candidate = null, stable = 0, emitted = null, lastRms = 0;
-  return {
-    push(midi, rms) {
-      const attack = lastRms > 0 && rms > lastRms * attackRatio;
-      lastRms = rms;
-      if (midi === null) { candidate = null; stable = 0; emitted = null; return null; }
-      if (attack) emitted = null;
-      if (midi === candidate) stable++; else { candidate = midi; stable = 1; }
-      if (stable >= framesToConfirm && emitted !== midi) { emitted = midi; return midi; }
-      return null;
-    },
-  };
+// ---------------------------------------------------------------------------
+// Detector de notas tocadas, ouvindo o microfone.
+//
+// Cada golpe de tecla é um ataque: a energia do som dá um salto. O detector
+// acompanha a energia em passos curtos (~5 ms, sem lacunas) e conta uma nota
+// a cada salto em relação ao que soava um instante antes, mesmo que a nota
+// anterior ainda esteja ressoando (repetições rápidas da mesma tecla).
+// Segurar a tecla (som só decaindo) conta uma vez. A altura é lida alguns
+// milissegundos depois do ataque, quando o som já se estabilizou.
+// ---------------------------------------------------------------------------
+class NoteOnsetDetector {
+  static HOP = 256;
+  static RING = 8192;
+  static PITCH_WINDOW = 1536;
+  static WAIT = 1280;        // espera após o ataque antes de ler a altura (amostras)
+  static GIVE_UP = 3840;
+  static ATTACK_RATIO = 1.5; // salto de energia total
+  static HF_RATIO = 2.2;     // salto nos agudos (golpe recoloca harmônicos e "estalo")
+
+  constructor(sampleRate, minRms = 0.02) {
+    this.sampleRate = sampleRate;
+    this.minRms = minRms;
+    // ~60 ms sem aceitar outro ataque: cobre até ~15 notas por segundo.
+    this.refractoryHops = Math.ceil((0.06 * sampleRate) / NoteOnsetDetector.HOP);
+    this.ring = new Float32Array(NoteOnsetDetector.RING);
+    this.pitchBuf = new Float32Array(NoteOnsetDetector.PITCH_WINDOW);
+    this.hearing = null; // nota MIDI soando agora (ou null)
+    this.reset();
+  }
+
+  reset() {
+    this.ring.fill(0);
+    this.pos = 0; this.hopSum = 0; this.hopSumD = 0; this.prevSample = 0; this.hopFill = 0;
+    this.hopSums = []; this.hopSumsD = []; this.history = []; this.historyD = [];
+    this.hops = 0; this.lastOnsetHop = -1e9; this.pending = [];
+    this.lastEmitted = null; this.candidate = null; this.candidateCount = 0;
+    this.silentEvals = 0; this.hearing = null;
+  }
+
+  /** Recebe áudio (qualquer tamanho de bloco); devolve as notas MIDI contadas. */
+  push(chunk) {
+    const out = [];
+    const mask = NoteOnsetDetector.RING - 1;
+    for (let i = 0; i < chunk.length; i++) {
+      const v = chunk[i];
+      this.ring[this.pos & mask] = v;
+      this.pos++;
+      this.hopSum += v * v;
+      const d = v - this.prevSample;
+      this.prevSample = v;
+      this.hopSumD += d * d;
+      if (++this.hopFill === NoteOnsetDetector.HOP) { this.hopFill = 0; this.step(out); }
+    }
+    return out;
+  }
+
+  step(out) {
+    const { HOP, WAIT, GIVE_UP, ATTACK_RATIO, HF_RATIO } = NoteOnsetDetector;
+    this.hopSums.push(this.hopSum); this.hopSumsD.push(this.hopSumD);
+    this.hopSum = 0; this.hopSumD = 0;
+    if (this.hopSums.length > 4) { this.hopSums.shift(); this.hopSumsD.shift(); }
+    if (this.hopSums.length < 4) return;
+    this.hops++;
+
+    const sum4 = (a) => a[0] + a[1] + a[2] + a[3];
+    const energy = sum4(this.hopSums) / (4 * HOP);
+    const energyD = sum4(this.hopSumsD) / (4 * HOP);
+    const floor = this.minRms * this.minRms;
+    if (this.history.length >= 4) {
+      const ref = Math.min(...this.history), refD = Math.min(...this.historyD);
+      const prev = this.history[this.history.length - 1];
+      const prevD = this.historyD[this.historyD.length - 1];
+      const rising = (energy > prev && energy > ref * ATTACK_RATIO) ||
+                     (energyD > prevD && energyD > refD * HF_RATIO);
+      if (this.hops - this.lastOnsetHop > this.refractoryHops && energy > floor && rising) {
+        this.lastOnsetHop = this.hops;
+        this.pending.push({ at: this.pos, last: null });
+      }
+    }
+    this.history.push(energy); this.historyD.push(energyD);
+    if (this.history.length > 8) { this.history.shift(); this.historyD.shift(); }
+
+    // Lê a altura dos ataques que já "assentaram".
+    this.pending = this.pending.filter((p) => {
+      const age = this.pos - p.at;
+      if (age < WAIT) return true;
+      if (age > GIVE_UP) return false;
+      const r = this.pitchNow(0.5);
+      if (!r) return true;
+      const midi = Math.round(freqToMidi(r.frequency));
+      if (p.last === midi || r.clarity >= 0.9) {
+        this.lastEmitted = midi; this.candidate = null; this.candidateCount = 0;
+        out.push(midi);
+        return false;
+      }
+      p.last = midi;
+      return true;
+    });
+
+    // Mostra o som na tela e pega trocas de nota sem ataque claro (notas ligadas).
+    if (this.hops % 4 === 0) {
+      const r = this.pitchNow(0.5);
+      const midi = r ? Math.round(freqToMidi(r.frequency)) : null;
+      this.hearing = midi;
+      const quiet = this.pending.length === 0 && this.hops - this.lastOnsetHop > this.refractoryHops + 8;
+      if (midi === null) {
+        if (++this.silentEvals >= 3) this.lastEmitted = null;
+        this.candidate = null; this.candidateCount = 0;
+      } else {
+        this.silentEvals = 0;
+        if (quiet && r.clarity >= 0.85) {
+          if (midi === this.candidate) this.candidateCount++;
+          else { this.candidate = midi; this.candidateCount = 1; }
+          const sameClass = this.lastEmitted !== null && noteOf(midi).pc === noteOf(this.lastEmitted).pc;
+          if (this.candidateCount >= 4 && !sameClass) {
+            this.lastEmitted = midi; this.candidateCount = 0;
+            out.push(midi);
+          }
+        } else { this.candidate = null; this.candidateCount = 0; }
+      }
+    }
+  }
+
+  pitchNow(minRmsFactor) {
+    const n = NoteOnsetDetector.PITCH_WINDOW;
+    if (this.pos < n) return null;
+    const mask = NoteOnsetDetector.RING - 1;
+    for (let i = 0; i < n; i++) this.pitchBuf[i] = this.ring[(this.pos - n + i) & mask];
+    return detectPitch(this.pitchBuf, this.sampleRate, this.minRms * minRmsFactor);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,13 +568,14 @@ $('midiBtn').onclick = async () => {
 // ---------------------------------------------------------------------------
 // Microfone
 // ---------------------------------------------------------------------------
-let micOn = false, micStream = null, micCtx = null, micFrame = 0;
+let micOn = false, micStream = null, micCtx = null, micNode = null;
+const MIN_RMS = [0.04, 0.02, 0.008]; // sensibilidade baixa / média / alta
 function stopMic() {
   micOn = false;
-  cancelAnimationFrame(micFrame);
+  if (micNode) { micNode.onaudioprocess = null; micNode.disconnect(); }
   micStream?.getTracks().forEach((t) => t.stop());
   micCtx?.close().catch(() => {});
-  micStream = micCtx = null;
+  micStream = micCtx = micNode = null;
   setButton($('micBtn'), false);
   setStatus($('micStatus'));
   $('live').classList.remove('show');
@@ -482,25 +598,17 @@ $('micBtn').onclick = async () => {
   }
   micCtx = new AudioContext();
   await micCtx.resume();
-  const analyser = micCtx.createAnalyser();
-  analyser.fftSize = 2048;
-  micCtx.createMediaStreamSource(micStream).connect(analyser);
-  const buf = new Float32Array(analyser.fftSize);
-  const tracker = makeOnsetTracker();
-  micOn = true;
-  setButton($('micBtn'), true);
-  setStatus($('micStatus'), 'ok', 'Ouvindo… toque uma nota.');
-  $('live').classList.add('show');
-
+  const detector = new NoteOnsetDetector(micCtx.sampleRate);
+  const source = micCtx.createMediaStreamSource(micStream);
+  // Áudio em blocos contínuos, sem lacunas: permite pegar cada golpe de uma
+  // repetição rápida.
+  micNode = micCtx.createScriptProcessor(512, 1, 1);
   let lastShown;
-  const loop = () => {
+  micNode.onaudioprocess = (e) => {
     if (!micOn) return;
-    analyser.getFloatTimeDomainData(buf);
-    const minRms = [0.04, 0.02, 0.008][Number($('sens').value) - 1] ?? 0.02;
-    const r = detectPitch(buf, micCtx.sampleRate, minRms);
-    const midi = r ? Math.round(freqToMidi(r.frequency)) : null;
-    const played = tracker.push(midi, r ? r.rms : 0);
-    if (played !== null) addNote(played);
+    detector.minRms = MIN_RMS[Number($('sens').value) - 1] ?? MIN_RMS[1];
+    for (const midi of detector.push(e.inputBuffer.getChannelData(0))) addNote(midi);
+    const midi = detector.hearing;
     if (midi !== lastShown) {
       lastShown = midi;
       if (midi === null) $('hearing').textContent = '—';
@@ -509,9 +617,16 @@ $('micBtn').onclick = async () => {
         $('hearing').innerHTML = `<span class="dot" style="background:${n.color}"></span> <b style="color:var(--ink)">${n.name}</b>`;
       }
     }
-    micFrame = requestAnimationFrame(loop);
   };
-  loop();
+  // O processador só roda ligado à saída; ganho zero evita o som no alto-falante.
+  const mute = micCtx.createGain();
+  mute.gain.value = 0;
+  source.connect(micNode);
+  micNode.connect(mute).connect(micCtx.destination);
+  micOn = true;
+  setButton($('micBtn'), true);
+  setStatus($('micStatus'), 'ok', 'Ouvindo… toque uma nota.');
+  $('live').classList.add('show');
 };
 
 refresh();

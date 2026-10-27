@@ -123,57 +123,211 @@ export function detectPitch(
 }
 
 /**
- * Transforma a leitura contínua do microfone em "notas tocadas".
+ * Transforma o som contínuo do microfone em "notas tocadas".
  *
- * Uma tecla de piano dá um ataque forte e depois vai sumindo. A regra é:
- * conta uma nota quando a mesma altura aparece estável por alguns quadros
- * seguidos; depois disso só conta de novo quando o som some, muda de nota ou
- * há um novo ataque (volume sobe de repente) — assim, tocar Dó três vezes
- * gera três bolinhas, mas segurar a tecla gera só uma.
+ * Cada golpe de tecla é um ataque: o volume sobe de repente. O detector
+ * acompanha a energia do som em passos curtos (~5 ms, sem lacunas entre
+ * eles) e conta uma nota sempre que a energia dá um salto em relação ao que
+ * vinha soando um instante antes — mesmo que a nota anterior ainda esteja
+ * ressoando, como em repetições rápidas da mesma tecla. Segurar a tecla
+ * (som só decaindo) conta uma vez.
+ *
+ * A altura da nota é lida alguns milissegundos depois do ataque, quando o
+ * som já se estabilizou. Como segurança, uma troca de nota sem ataque claro
+ * (notas ligadas, bem suaves) também é contada.
  */
-export class NoteOnsetTracker {
+export class NoteOnsetDetector {
+  /** Nota MIDI que está soando agora (ou null), para mostrar na tela. */
+  hearing: number | null = null
+
+  private static readonly HOP = 256
+  private static readonly RING = 8192
+  private static readonly PITCH_WINDOW = 1536
+  /** Quanto esperar depois do ataque antes de ler a altura (amostras). */
+  private static readonly WAIT = 1280
+  private static readonly GIVE_UP = 3840
+  /** Salto de energia (vezes) que caracteriza um novo ataque. */
+  private static readonly ATTACK_RATIO = 1.5
+  /**
+   * Salto nos agudos (energia da diferença entre amostras). Todo golpe de
+   * tecla recoloca os harmônicos e o "estalo" do ataque, que a nota anterior
+   * já perdeu — então este sinal sobe mesmo quando o volume total quase não
+   * muda (nota nova somando com a cauda da anterior).
+   */
+  private static readonly HF_RATIO = 2.2
+
+  private readonly ring = new Float32Array(NoteOnsetDetector.RING)
+  private readonly pitchBuf = new Float32Array(NoteOnsetDetector.PITCH_WINDOW)
+  private readonly refractoryHops: number
+  private pos = 0
+  private hopSum = 0
+  private hopFill = 0
+  private hopSumD = 0
+  private prevSample = 0
+  private hopSums: number[] = []
+  private hopSumsD: number[] = []
+  private history: number[] = []
+  private historyD: number[] = []
+  private hops = 0
+  private lastOnsetHop = -1e9
+  private pending: Array<{ at: number; last: number | null }> = []
+  private lastEmitted: number | null = null
   private candidate: number | null = null
-  private stableFrames = 0
-  private emitted: number | null = null
-  private lastRms = 0
+  private candidateCount = 0
+  private silentEvals = 0
 
   constructor(
-    private readonly framesToConfirm = 3,
-    private readonly attackRatio = 1.6,
-  ) {}
+    private readonly sampleRate: number,
+    private minRms = 0.02,
+  ) {
+    // ~60 ms sem aceitar outro ataque: cobre até ~15 notas por segundo.
+    this.refractoryHops = Math.ceil((0.06 * sampleRate) / NoteOnsetDetector.HOP)
+  }
 
-  /** Recebe a nota MIDI detectada no quadro (ou null) e o volume. */
-  push(midi: number | null, rms: number): number | null {
-    const attack = this.lastRms > 0 && rms > this.lastRms * this.attackRatio
-    this.lastRms = rms
-
-    if (midi === null) {
-      this.candidate = null
-      this.stableFrames = 0
-      this.emitted = null
-      return null
-    }
-
-    if (attack) this.emitted = null
-
-    if (midi === this.candidate) {
-      this.stableFrames++
-    } else {
-      this.candidate = midi
-      this.stableFrames = 1
-    }
-
-    if (this.stableFrames >= this.framesToConfirm && this.emitted !== midi) {
-      this.emitted = midi
-      return midi
-    }
-    return null
+  setMinRms(minRms: number) {
+    this.minRms = minRms
   }
 
   reset() {
+    this.ring.fill(0)
+    this.pos = 0
+    this.hopSum = 0
+    this.hopSumD = 0
+    this.prevSample = 0
+    this.hopFill = 0
+    this.hopSums = []
+    this.hopSumsD = []
+    this.history = []
+    this.historyD = []
+    this.hops = 0
+    this.lastOnsetHop = -1e9
+    this.pending = []
+    this.lastEmitted = null
     this.candidate = null
-    this.stableFrames = 0
-    this.emitted = null
-    this.lastRms = 0
+    this.candidateCount = 0
+    this.silentEvals = 0
+    this.hearing = null
+  }
+
+  /** Recebe um pedaço de áudio (qualquer tamanho); devolve as notas MIDI contadas. */
+  push(chunk: Float32Array): number[] {
+    const out: number[] = []
+    const mask = NoteOnsetDetector.RING - 1
+    for (let i = 0; i < chunk.length; i++) {
+      const v = chunk[i]
+      this.ring[this.pos & mask] = v
+      this.pos++
+      this.hopSum += v * v
+      const d = v - this.prevSample
+      this.prevSample = v
+      this.hopSumD += d * d
+      if (++this.hopFill === NoteOnsetDetector.HOP) {
+        this.hopFill = 0
+        this.step(out)
+      }
+    }
+    return out
+  }
+
+  private step(out: number[]) {
+    const { HOP, WAIT, GIVE_UP, ATTACK_RATIO, HF_RATIO } = NoteOnsetDetector
+    this.hopSums.push(this.hopSum)
+    this.hopSumsD.push(this.hopSumD)
+    this.hopSum = 0
+    this.hopSumD = 0
+    if (this.hopSums.length > 4) {
+      this.hopSums.shift()
+      this.hopSumsD.shift()
+    }
+    if (this.hopSums.length < 4) return
+    this.hops++
+
+    // Energia média nos últimos ~20 ms, atualizada a cada passo.
+    const energy = (this.hopSums[0] + this.hopSums[1] + this.hopSums[2] + this.hopSums[3]) / (4 * HOP)
+    const energyD = (this.hopSumsD[0] + this.hopSumsD[1] + this.hopSumsD[2] + this.hopSumsD[3]) / (4 * HOP)
+    const floor = this.minRms * this.minRms
+    if (this.history.length >= 4) {
+      let ref = Infinity
+      let refD = Infinity
+      for (const h of this.history) if (h < ref) ref = h
+      for (const h of this.historyD) if (h < refD) refD = h
+      const prev = this.history[this.history.length - 1]
+      const prevD = this.historyD[this.historyD.length - 1]
+      const rising =
+        (energy > prev && energy > ref * ATTACK_RATIO) ||
+        (energyD > prevD && energyD > refD * HF_RATIO)
+      if (this.hops - this.lastOnsetHop > this.refractoryHops && energy > floor && rising) {
+        this.lastOnsetHop = this.hops
+        this.pending.push({ at: this.pos, last: null })
+      }
+    }
+    this.history.push(energy)
+    this.historyD.push(energyD)
+    if (this.history.length > 8) {
+      this.history.shift()
+      this.historyD.shift()
+    }
+
+    // Lê a altura dos ataques que já "assentaram".
+    this.pending = this.pending.filter((p) => {
+      const age = this.pos - p.at
+      if (age < WAIT) return true
+      if (age > GIVE_UP) return false
+      const r = this.pitchNow(0.5)
+      if (!r) return true
+      const midi = Math.round(frequencyToMidi(r.frequency))
+      if (p.last === midi || r.clarity >= 0.9) {
+        this.lastEmitted = midi
+        this.candidate = null
+        this.candidateCount = 0
+        out.push(midi)
+        return false
+      }
+      p.last = midi
+      return true
+    })
+
+    // Acompanha o som para a tela e pega trocas de nota sem ataque claro.
+    if (this.hops % 4 === 0) {
+      const r = this.pitchNow(0.5)
+      const midi = r ? Math.round(frequencyToMidi(r.frequency)) : null
+      this.hearing = midi
+      const quiet =
+        this.pending.length === 0 &&
+        this.hops - this.lastOnsetHop > this.refractoryHops + 8
+      if (midi === null) {
+        if (++this.silentEvals >= 3) this.lastEmitted = null
+        this.candidate = null
+        this.candidateCount = 0
+      } else {
+        this.silentEvals = 0
+        if (quiet && r!.clarity >= 0.85) {
+          if (midi === this.candidate) this.candidateCount++
+          else {
+            this.candidate = midi
+            this.candidateCount = 1
+          }
+          const sameClass =
+            this.lastEmitted !== null &&
+            pitchClassOf(midi) === pitchClassOf(this.lastEmitted)
+          if (this.candidateCount >= 4 && !sameClass) {
+            this.lastEmitted = midi
+            this.candidateCount = 0
+            out.push(midi)
+          }
+        } else {
+          this.candidate = null
+          this.candidateCount = 0
+        }
+      }
+    }
+  }
+
+  private pitchNow(minRmsFactor: number) {
+    const n = NoteOnsetDetector.PITCH_WINDOW
+    if (this.pos < n) return null
+    const mask = NoteOnsetDetector.RING - 1
+    for (let i = 0; i < n; i++) this.pitchBuf[i] = this.ring[(this.pos - n + i) & mask]
+    return detectPitch(this.pitchBuf, this.sampleRate, this.minRms * minRmsFactor)
   }
 }
