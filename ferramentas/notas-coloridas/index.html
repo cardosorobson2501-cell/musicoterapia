@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Notas Coloridas</title>
+<meta name="description" content="Toque uma nota no teclado e ela aparece na tela como uma bolinha colorida. Funciona com teclado MIDI, microfone ou teclado na tela.">
+<meta name="theme-color" content="#f7f8fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#191c24" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='30' cy='35' r='22' fill='%23e53935'/><circle cx='70' cy='35' r='22' fill='%231e88e5'/><circle cx='50' cy='70' r='22' fill='%23fdd835'/></svg>">
+<style>
+  :root {
+    --bg: #f7f8fb; --surface: #fff; --surface-2: #f0f2f6; --border: #dde1e8;
+    --ink: #1f2430; --ink-soft: #69707e; --brand: #2f6fd6; --brand-ink: #fff;
+    --ok: #2e9b5c; --danger: #d03a2f; --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191c24; --surface: #22262f; --surface-2: #2a2e38; --border: #383d49;
+      --ink: #eef0f4; --ink-soft: #a9afbb; --brand: #6aa2f5; --brand-ink: #10141c;
+      --ok: #5fcf8b; --danger: #ff7a6e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: light dark; -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); min-height: 100dvh;
+    font: 16px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: calc(16px + env(safe-area-inset-top)) 16px calc(32px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--ink-soft); margin: 2px 0 16px; font-size: .95rem; }
+  .stack > * + * { margin-top: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+  button, select { font: inherit; font-size: max(1rem, 16px); }
+  .btn {
+    min-height: 48px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--ink); font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .btn:active { filter: brightness(.92); }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.on { background: var(--brand); color: var(--brand-ink); border-color: transparent; }
+  .source { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .source + .source { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .source p { margin: 0; }
+  .source .name { font-weight: 600; }
+  .hint { font-size: .8rem; color: var(--ink-soft); }
+  .status { font-size: .8rem; margin-top: 4px; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--danger); } .status.wait { color: var(--ink-soft); }
+  .live { display: none; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; margin-top: 12px; font-size: .9rem; color: var(--ink-soft); }
+  .live.show { display: flex; }
+  .live select { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); padding: 4px 8px; }
+  .dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; vertical-align: middle; }
+
+  .board {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; height: 45dvh; min-height: 260px; overflow-y: auto;
+  }
+  .board .empty { height: 100%; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--ink-soft); margin: 0; }
+  .bubbles { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+  .bubble {
+    width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: .75rem; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+    animation: pop 260ms ease-out;
+  }
+  @keyframes pop { 0% { transform: scale(.2); opacity: 0; } 70% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+  body.hide-names .bubble span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  .tally { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .tally li { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border-radius: 999px; padding: 4px 12px 4px 4px; font-size: .9rem; }
+  .tally .dot { width: 20px; height: 20px; }
+
+  .actions { display: flex; gap: 8px; }
+  .actions .grow { flex: 1; }
+
+  .keys { position: relative; display: flex; height: 140px; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  .white {
+    flex: 1; background: #fff; color: #444; border: 1px solid #c9ced8; border-radius: 0 0 10px 10px;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end; padding-bottom: 8px;
+    font-size: .8rem; font-weight: 600; cursor: pointer; gap: 4px;
+  }
+  .white:active, .white.hit { background: #e6e9ef; }
+  .black {
+    position: absolute; top: 0; width: 9%; height: 60%; transform: translateX(-50%); z-index: 2;
+    background: #1b1d22; border: 0; border-radius: 0 0 7px 7px; cursor: pointer;
+    display: flex; align-items: flex-end; justify-content: center; padding-bottom: 6px;
+  }
+  .black:active, .black.hit { background: #444851; }
+  .black .dot { width: 12px; height: 12px; }
+
+  .legend { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 8px; list-style: none; margin: 0; padding: 0; font-size: .9rem; }
+  @media (min-width: 560px) { .legend { grid-template-columns: repeat(6, 1fr); } }
+  .legend li { display: flex; align-items: center; gap: 8px; }
+  .legend .dot { width: 20px; height: 20px; flex-shrink: 0; }
+  .check { display: flex; align-items: center; gap: 10px; font-size: .95rem; }
+  .check input { width: 20px; height: 20px; accent-color: var(--brand); }
+  .help summary { cursor: pointer; font-weight: 600; }
+  .help ul { margin: 8px 0 0; padding-left: 20px; color: var(--ink-soft); font-size: .9rem; }
+  .help li + li { margin-top: 6px; }
+
+  /* Tela cheia: só as bolinhas, a contagem, o teclado e os botões. */
+  body.big main { max-width: none; height: 100dvh; display: flex; flex-direction: column; }
+  body.big main > .stack { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  body.big main > .stack > * + * { margin-top: 12px; }
+  body.big .only-normal { display: none !important; }
+  body.big .board { flex: 1; height: auto; min-height: 0; }
+  body.big .bubbles { gap: 16px; }
+  body.big .bubble { width: 80px; height: 80px; font-size: 1.1rem; }
+
+  @media (prefers-reduced-motion: reduce) { .bubble { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header class="only-normal">
+    <h1>Notas Coloridas</h1>
+    <p class="sub">Cada nota tocada vira uma bolinha colorida</p>
+  </header>
+
+  <div class="stack">
+    <section class="card only-normal" aria-label="De onde vêm as notas">
+      <div class="source">
+        <div>
+          <p class="name">🎹 Teclado MIDI</p>
+          <p class="hint">Ligue o teclado pelo cabo USB (no celular, com adaptador OTG).</p>
+          <p class="status" id="midiStatus"></p>
+        </div>
+        <button class="btn" id="midiBtn" aria-pressed="false">Ligar</button>
+      </div>
+      <div class="source">
+        <div>
+          <p class="name">🎤 Microfone</p>
+          <p class="hint">Para teclado sem cabo: o aparelho escuta o som e descobre a nota.</p>
+          <p class="status" id="micStatus"></p>
+        </div>
+        <button class="btn" id="micBtn" aria-pressed="false">Ligar</button>
+      </div>
+      <div class="live" id="live">
+        <span>Ouvindo agora: <span id="hearing">—</span></span>
+        <label>Sensibilidade
+          <select id="sens">
+            <option value="1">Baixa</option>
+            <option value="2" selected>Média</option>
+            <option value="3">Alta</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="board" id="board" aria-live="polite" aria-label="Notas tocadas">
+      <p class="empty" id="empty">Toque uma nota no teclado<br>e ela aparece aqui como uma bolinha colorida.</p>
+      <ul class="bubbles" id="bubbles"></ul>
+    </section>
+
+    <ul class="tally" id="tally" aria-label="Contagem por nota"></ul>
+
+    <div class="actions">
+      <button class="btn grow" id="undo" disabled>↶ Desfazer</button>
+      <button class="btn grow" id="clear" disabled>🗑 Limpar</button>
+      <button class="btn" id="bigBtn" aria-label="Tela cheia">⛶</button>
+    </div>
+
+    <section>
+      <p class="hint only-normal" style="margin:0 0 8px">Teclado na tela — para testar ou usar sem instrumento:</p>
+      <div class="keys" id="keys"></div>
+    </section>
+
+    <label class="check only-normal">
+      <input type="checkbox" id="names" checked>
+      Escrever o nome da nota dentro da bolinha
+    </label>
+
+    <section class="card only-normal">
+      <p style="margin:0 0 12px;font-weight:600">Cores das notas</p>
+      <ul class="legend" id="legend"></ul>
+    </section>
+
+    <details class="card help only-normal">
+      <summary>Dicas de uso</summary>
+      <ul>
+        <li><b>Teclado MIDI</b> funciona no Chrome ou Edge (computador e Android). No iPhone não há MIDI — use o microfone.</li>
+        <li><b>Microfone:</b> toque uma nota de cada vez, perto do aparelho, em sala silenciosa. Se contar notas a mais, baixe a sensibilidade; se deixar de contar, aumente.</li>
+        <li>Tocar a mesma nota várias vezes gera várias bolinhas. Segurar a tecla gera uma só.</li>
+        <li>O botão ⛶ deixa as bolinhas grandes, para mostrar ao paciente.</li>
+      </ul>
+    </details>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Notas e cores. As naturais seguem o arco-íris (Dó vermelho … Si rosa); os
+// sustenidos ganham um tom intermediário entre as vizinhas.
+// ---------------------------------------------------------------------------
+const NOTES = [
+  { pc: 0,  name: 'Dó',   color: '#e53935', ink: '#fff',    sharp: false },
+  { pc: 1,  name: 'Dó#',  color: '#f4511e', ink: '#fff',    sharp: true  },
+  { pc: 2,  name: 'Ré',   color: '#fb8c00', ink: '#fff',    sharp: false },
+  { pc: 3,  name: 'Ré#',  color: '#ffb300', ink: '#3a2a00', sharp: true  },
+  { pc: 4,  name: 'Mi',   color: '#fdd835', ink: '#3a2a00', sharp: false },
+  { pc: 5,  name: 'Fá',   color: '#43a047', ink: '#fff',    sharp: false },
+  { pc: 6,  name: 'Fá#',  color: '#00897b', ink: '#fff',    sharp: true  },
+  { pc: 7,  name: 'Sol',  color: '#1e88e5', ink: '#fff',    sharp: false },
+  { pc: 8,  name: 'Sol#', color: '#3949ab', ink: '#fff',    sharp: true  },
+  { pc: 9,  name: 'Lá',   color: '#5e35b1', ink: '#fff',    sharp: false },
+  { pc: 10, name: 'Lá#',  color: '#8e24aa', ink: '#fff',    sharp: true  },
+  { pc: 11, name: 'Si',   color: '#d81b60', ink: '#fff',    sharp: false },
+];
+const noteOf = (midi) => NOTES[((Math.round(midi) % 12) + 12) % 12];
+const octaveOf = (midi) => Math.floor(Math.round(midi) / 12) - 1;
+const freqToMidi = (f) => 69 + 12 * Math.log2(f / 440);
+const midiToFreq = (m) => 440 * 2 ** ((m - 69) / 12);
+
+// ---------------------------------------------------------------------------
+// Detecção de altura por autocorrelação normalizada (variação do método
+// McLeod). Devolve null para silêncio ou som sem nota definida.
+// ---------------------------------------------------------------------------
+function detectPitch(buf, sampleRate, minRms) {
+  const n = buf.length;
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) sumSq += buf[i] * buf[i];
+  const rms = Math.sqrt(sumSq / n);
+  if (rms < minRms) return null;
+
+  const minLag = Math.floor(sampleRate / 2000);
+  const maxLag = Math.min(Math.floor(sampleRate / 50), Math.floor(n / 2));
+  const nsdf = new Float32Array(maxLag + 1);
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let acf = 0, energy = 0;
+    for (let i = 0; i < n - lag; i++) {
+      acf += buf[i] * buf[i + lag];
+      energy += buf[i] * buf[i] + buf[i + lag] * buf[i + lag];
+    }
+    nsdf[lag] = energy > 0 ? (2 * acf) / energy : 0;
+  }
+
+  const peaks = [];
+  let lag = minLag;
+  while (lag < maxLag && nsdf[lag] > 0) lag++;
+  while (lag < maxLag) {
+    while (lag < maxLag && nsdf[lag] <= 0) lag++;
+    let best = lag;
+    while (lag < maxLag && nsdf[lag] > 0) { if (nsdf[lag] > nsdf[best]) best = lag; lag++; }
+    if (best < maxLag && nsdf[best] > 0) peaks.push(best);
+  }
+  if (!peaks.length) return null;
+
+  const highest = Math.max(...peaks.map((p) => nsdf[p]));
+  const chosen = peaks.find((p) => nsdf[p] >= 0.9 * highest) ?? peaks[0];
+  if (nsdf[chosen] < 0.6) return null;
+
+  const a = nsdf[chosen - 1] ?? nsdf[chosen], b = nsdf[chosen], c = nsdf[chosen + 1] ?? nsdf[chosen];
+  const denom = a - 2 * b + c;
+  const shift = denom !== 0 ? (0.5 * (a - c)) / denom : 0;
+  return { frequency: sampleRate / (chosen + shift), rms };
+}
+
+// Conta uma nota quando ela fica estável alguns quadros; só conta de novo
+// depois de silêncio, troca de nota ou novo ataque (volume sobe de repente).
+function makeOnsetTracker(framesToConfirm = 3, attackRatio = 1.6) {
+  let candidate = null, stable = 0, emitted = null, lastRms = 0;
+  return {
+    push(midi, rms) {
+      const attack = lastRms > 0 && rms > lastRms * attackRatio;
+      lastRms = rms;
+      if (midi === null) { candidate = null; stable = 0; emitted = null; return null; }
+      if (attack) emitted = null;
+      if (midi === candidate) stable++; else { candidate = midi; stable = 1; }
+      if (stable >= framesToConfirm && emitted !== midi) { emitted = midi; return midi; }
+      return null;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tela
+// ---------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const bubbles = [];
+
+function addNote(midi) {
+  bubbles.push(midi);
+  const n = noteOf(midi);
+  const li = document.createElement('li');
+  li.className = 'bubble';
+  li.style.background = n.color;
+  li.style.color = n.ink;
+  li.title = n.name + octaveOf(midi);
+  li.innerHTML = '<span></span>';
+  li.firstChild.textContent = n.name;
+  $('bubbles').appendChild(li);
+  li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  refresh();
+}
+
+function refresh() {
+  $('empty').style.display = bubbles.length ? 'none' : '';
+  $('undo').disabled = $('clear').disabled = bubbles.length === 0;
+  const counts = new Map();
+  for (const m of bubbles) { const pc = noteOf(m).pc; counts.set(pc, (counts.get(pc) || 0) + 1); }
+  $('tally').innerHTML = '';
+  for (const n of NOTES) {
+    if (!counts.has(n.pc)) continue;
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="dot" style="background:${n.color}"></span>${n.name} × ${counts.get(n.pc)}`;
+    $('tally').appendChild(li);
+  }
+}
+
+$('undo').onclick = () => { bubbles.pop(); $('bubbles').lastElementChild?.remove(); refresh(); };
+$('clear').onclick = () => { bubbles.length = 0; $('bubbles').innerHTML = ''; refresh(); };
+$('names').onchange = (e) => document.body.classList.toggle('hide-names', !e.target.checked);
+
+// Legenda
+for (const n of NOTES) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="dot" style="background:${n.color}"></span>${n.name}`;
+  $('legend').appendChild(li);
+}
+
+// Tela cheia (no iPhone fica só a versão ampliada, sem esconder a barra).
+function setBig(on) {
+  document.body.classList.toggle('big', on);
+  $('bigBtn').setAttribute('aria-label', on ? 'Sair da tela cheia' : 'Tela cheia');
+}
+$('bigBtn').onclick = () => {
+  const on = !document.body.classList.contains('big');
+  setBig(on);
+  if (on) document.documentElement.requestFullscreen?.().catch(() => {});
+  else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+};
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) setBig(false); });
+
+// ---------------------------------------------------------------------------
+// Som do teclado da tela
+// ---------------------------------------------------------------------------
+let toneCtx = null;
+function playTone(freq) {
+  if (!window.AudioContext) return;
+  toneCtx ??= new AudioContext();
+  toneCtx.resume().catch(() => {});
+  const now = toneCtx.currentTime;
+  const osc = toneCtx.createOscillator(), gain = toneCtx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.3, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
+  osc.connect(gain).connect(toneCtx.destination);
+  osc.start(now);
+  osc.stop(now + 0.85);
+}
+
+// Teclado da tela: uma oitava, Dó central a Si.
+(function buildKeys() {
+  const base = 60;
+  const whites = NOTES.filter((n) => !n.sharp);
+  const blacks = [{ pc: 1, after: 0 }, { pc: 3, after: 1 }, { pc: 6, after: 3 }, { pc: 8, after: 4 }, { pc: 10, after: 5 }];
+  const press = (midi) => {
+    // Com o microfone ligado, o som do aparelho seria contado duas vezes.
+    if (!micOn) playTone(midiToFreq(midi));
+    addNote(midi);
+  };
+  const wire = (el, midi) => {
+    el.type = 'button';
+    el.addEventListener('pointerdown', (e) => { e.preventDefault(); press(midi); });
+    el.addEventListener('click', (e) => { if (e.detail === 0) press(midi); });
+  };
+  for (const n of whites) {
+    const b = document.createElement('button');
+    b.className = 'white';
+    b.setAttribute('aria-label', n.name);
+    b.innerHTML = `<span class="dot" style="background:${n.color}"></span>${n.name}`;
+    wire(b, base + n.pc);
+    $('keys').appendChild(b);
+  }
+  for (const { pc, after } of blacks) {
+    const b = document.createElement('button');
+    b.className = 'black';
+    b.style.left = ((after + 1) / whites.length) * 100 + '%';
+    b.setAttribute('aria-label', NOTES[pc].name);
+    b.innerHTML = `<span class="dot" style="background:${NOTES[pc].color}"></span>`;
+    wire(b, base + pc);
+    $('keys').appendChild(b);
+  }
+})();
+
+// Teclado do computador também toca (A S D F G H J = Dó a Si; W E T Y U = pretas).
+const KEYMAP = { a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71 };
+document.addEventListener('keydown', (e) => {
+  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement) return;
+  const midi = KEYMAP[e.key.toLowerCase()];
+  if (midi !== undefined) { if (!micOn) playTone(midiToFreq(midi)); addNote(midi); }
+});
+
+function setStatus(el, kind, text) {
+  el.className = 'status ' + (kind || '');
+  el.textContent = text || '';
+}
+function setButton(btn, on) {
+  btn.classList.toggle('on', on);
+  btn.textContent = on ? 'Ligado' : 'Ligar';
+  btn.setAttribute('aria-pressed', String(on));
+}
+
+// ---------------------------------------------------------------------------
+// Teclado MIDI
+// ---------------------------------------------------------------------------
+let midiAccess = null, midiOn = false;
+function onMidiMessage(e) {
+  if (!e.data || e.data.length < 3) return;
+  const [status, note, velocity] = e.data;
+  if ((status & 0xf0) === 0x90 && velocity > 0) addNote(note);
+}
+function attachMidi() {
+  if (!midiAccess || !midiOn) return;
+  const names = [];
+  midiAccess.inputs.forEach((input) => {
+    input.onmidimessage = onMidiMessage;
+    if (input.state === 'connected') names.push(input.name || 'Teclado');
+  });
+  if (names.length) setStatus($('midiStatus'), 'ok', 'Conectado: ' + names.join(', '));
+  else setStatus($('midiStatus'), 'wait', 'Nenhum teclado encontrado. Conecte o cabo USB do teclado.');
+}
+$('midiBtn').onclick = async () => {
+  if (midiOn) {
+    midiOn = false;
+    setButton($('midiBtn'), false);
+    setStatus($('midiStatus'));
+    midiAccess?.inputs.forEach((i) => { i.onmidimessage = null; });
+    return;
+  }
+  if (!navigator.requestMIDIAccess) {
+    setStatus($('midiStatus'), 'err', 'Este navegador não aceita teclado MIDI. Use o Chrome ou o Edge (computador ou Android). No iPhone, use o microfone.');
+    return;
+  }
+  setStatus($('midiStatus'), 'wait', 'Conectando…');
+  try {
+    midiAccess ??= await navigator.requestMIDIAccess();
+    midiAccess.onstatechange = attachMidi;
+    midiOn = true;
+    setButton($('midiBtn'), true);
+    attachMidi();
+  } catch {
+    setStatus($('midiStatus'), 'err', 'O navegador não deu acesso ao teclado MIDI. Verifique a permissão do site.');
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Microfone
+// ---------------------------------------------------------------------------
+let micOn = false, micStream = null, micCtx = null, micFrame = 0;
+function stopMic() {
+  micOn = false;
+  cancelAnimationFrame(micFrame);
+  micStream?.getTracks().forEach((t) => t.stop());
+  micCtx?.close().catch(() => {});
+  micStream = micCtx = null;
+  setButton($('micBtn'), false);
+  setStatus($('micStatus'));
+  $('live').classList.remove('show');
+}
+$('micBtn').onclick = async () => {
+  if (micOn) return stopMic();
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setStatus($('micStatus'), 'err', 'Este navegador não dá acesso ao microfone.');
+    return;
+  }
+  setStatus($('micStatus'), 'wait', 'Conectando…');
+  try {
+    // Sem os "filtros de chamada": eles abafam o som do instrumento.
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch {
+    setStatus($('micStatus'), 'err', 'Não foi possível usar o microfone. Libere a permissão de microfone para este site e tente de novo.');
+    return;
+  }
+  micCtx = new AudioContext();
+  await micCtx.resume();
+  const analyser = micCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  micCtx.createMediaStreamSource(micStream).connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  const tracker = makeOnsetTracker();
+  micOn = true;
+  setButton($('micBtn'), true);
+  setStatus($('micStatus'), 'ok', 'Ouvindo… toque uma nota.');
+  $('live').classList.add('show');
+
+  let lastShown;
+  const loop = () => {
+    if (!micOn) return;
+    analyser.getFloatTimeDomainData(buf);
+    const minRms = [0.04, 0.02, 0.008][Number($('sens').value) - 1] ?? 0.02;
+    const r = detectPitch(buf, micCtx.sampleRate, minRms);
+    const midi = r ? Math.round(freqToMidi(r.frequency)) : null;
+    const played = tracker.push(midi, r ? r.rms : 0);
+    if (played !== null) addNote(played);
+    if (midi !== lastShown) {
+      lastShown = midi;
+      if (midi === null) $('hearing').textContent = '—';
+      else {
+        const n = noteOf(midi);
+        $('hearing').innerHTML = `<span class="dot" style="background:${n.color}"></span> <b style="color:var(--ink)">${n.name}</b>`;
+      }
+    }
+    micFrame = requestAnimationFrame(loop);
+  };
+  loop();
+};
+
+refresh();
+</script>
+</body>
+</html>
