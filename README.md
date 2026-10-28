@@ -119,10 +119,13 @@ Três jeitos de mandar as notas:
 - **Teclado MIDI** (mais preciso): ligue o teclado pelo cabo USB (no celular,
   com adaptador OTG) e toque em "Ligar". Funciona no Chrome/Edge do
   computador e do Android. **Não funciona no iPhone** (o Safari não tem MIDI).
-- **Microfone**: para teclado sem cabo ou no iPhone. Toque uma nota de cada
-  vez; se estiver contando notas a mais ou a menos, ajuste a
-  "Sensibilidade". Funciona melhor em sala silenciosa e com o aparelho
-  perto do teclado.
+- **Microfone**: para teclado sem cabo ou no iPhone. Cada golpe de tecla vira
+  uma bolinha, inclusive repetições rápidas da mesma nota (testado até
+  ~12 notas por segundo). Funciona melhor em sala silenciosa e com o aparelho
+  perto do teclado. Em "Ajustar calibração do microfone" há um medidor de
+  volume e quatro ajustes (volume mínimo, sensibilidade ao golpe,
+  sensibilidade ao "estalo" e intervalo mínimo entre notas), cada um com uma
+  dica de quando mexer. Os ajustes ficam guardados no aparelho.
 - **Teclado na tela**: para testar ou usar sem instrumento.
 
 O botão de tela cheia amplia as bolinhas para mostrar ao paciente.

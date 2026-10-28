@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 import {
-  NoteOnsetTracker,
-  detectPitch,
-  frequencyToMidi,
+  type DetectorSettings,
+  NoteOnsetDetector,
+  levelOf,
 } from '@/lib/domain/notes'
 
 /**
@@ -100,19 +100,22 @@ export function useMidiInput(enabled: boolean, onNote: (midi: number) => void) {
 export function useMicrophoneInput(
   enabled: boolean,
   onNote: (midi: number) => void,
-  sensitivity: number,
+  settings: DetectorSettings,
 ) {
   const [status, setStatus] = useState<InputStatus>({ state: 'off' })
   const [hearing, setHearing] = useState<number | null>(null)
+  /** Volume que entra pelo microfone (0–100), para o medidor de calibração. */
+  const [level, setLevel] = useState(0)
   const onNoteRef = useRef(onNote)
   onNoteRef.current = onNote
-  const sensitivityRef = useRef(sensitivity)
-  sensitivityRef.current = sensitivity
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
 
   useEffect(() => {
     if (!enabled) {
       setStatus({ state: 'off' })
       setHearing(null)
+      setLevel(0)
       return
     }
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -126,14 +129,13 @@ export function useMicrophoneInput(
     let cancelled = false
     let stream: MediaStream | null = null
     let ctx: AudioContext | null = null
-    let frame = 0
-    const tracker = new NoteOnsetTracker()
+    let processor: ScriptProcessorNode | null = null
     setStatus({ state: 'starting' })
 
     navigator.mediaDevices
       .getUserMedia({
-        // Sem os "filtros de chamada": eles abafam justamente o som do
-        // instrumento, que o navegador confunde com ruído de fundo.
+        // Sem os "filtros de chamada": eles abafam o som do instrumento e
+        // "achatam" os golpes repetidos, que o navegador confunde com ruído.
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
@@ -148,31 +150,37 @@ export function useMicrophoneInput(
         stream = s
         ctx = new AudioContext()
         await ctx.resume()
+        const detector = new NoteOnsetDetector(ctx.sampleRate, settingsRef.current)
         const source = ctx.createMediaStreamSource(s)
-        const analyser = ctx.createAnalyser()
-        analyser.fftSize = 2048
-        source.connect(analyser)
-        const buffer = new Float32Array(analyser.fftSize)
-        const sampleRate = ctx.sampleRate
-        setStatus({ state: 'on', detail: 'Ouvindo… toque uma nota.' })
-
+        // Recebe o áudio em blocos contínuos, sem lacunas: é o que permite
+        // pegar cada golpe de uma repetição rápida.
+        processor = ctx.createScriptProcessor(512, 1, 1)
         let lastShown: number | null = null
-        const loop = () => {
+        let lastLevelAt = 0
+        processor.onaudioprocess = (e) => {
           if (cancelled) return
-          analyser.getFloatTimeDomainData(buffer)
-          // Sensibilidade 1 (baixa) a 3 (alta) → volume mínimo para contar.
-          const minRms = [0.04, 0.02, 0.008][sensitivityRef.current - 1] ?? 0.02
-          const r = detectPitch(buffer, sampleRate, minRms)
-          const midi = r ? Math.round(frequencyToMidi(r.frequency)) : null
-          const played = tracker.push(midi, r?.rms ?? 0)
-          if (played !== null) onNoteRef.current(played)
-          if (midi !== lastShown) {
-            lastShown = midi
-            setHearing(midi)
+          detector.configure(settingsRef.current)
+          for (const midi of detector.push(e.inputBuffer.getChannelData(0))) {
+            onNoteRef.current(midi)
           }
-          frame = requestAnimationFrame(loop)
+          if (detector.hearing !== lastShown) {
+            lastShown = detector.hearing
+            setHearing(lastShown)
+          }
+          // O medidor atualiza ~20 vezes por segundo, o bastante para ver o volume.
+          const now = performance.now()
+          if (now - lastLevelAt > 50) {
+            lastLevelAt = now
+            setLevel(levelOf(detector.level))
+          }
         }
-        loop()
+        // O processador só roda se estiver ligado à saída; o ganho zero
+        // impede que o som do microfone saia no alto-falante.
+        const mute = ctx.createGain()
+        mute.gain.value = 0
+        source.connect(processor)
+        processor.connect(mute).connect(ctx.destination)
+        setStatus({ state: 'on', detail: 'Ouvindo… toque uma nota.' })
       })
       .catch(() => {
         if (!cancelled)
@@ -185,14 +193,16 @@ export function useMicrophoneInput(
 
     return () => {
       cancelled = true
-      cancelAnimationFrame(frame)
+      if (processor) processor.onaudioprocess = null
+      processor?.disconnect()
       stream?.getTracks().forEach((t) => t.stop())
       ctx?.close().catch(() => {})
       setHearing(null)
+      setLevel(0)
     }
   }, [enabled])
 
-  return { status, hearing }
+  return { status, hearing, level }
 }
 
 /** Toca um som curto, para o teclado da tela não ficar mudo. */
