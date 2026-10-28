@@ -95,6 +95,18 @@
   .legend .dot { width: 20px; height: 20px; flex-shrink: 0; }
   .check { display: flex; align-items: center; gap: 10px; font-size: .95rem; }
   .check input { width: 20px; height: 20px; accent-color: var(--brand); }
+  .calib summary { cursor: pointer; font-weight: 600; min-height: 32px; display: flex; align-items: center; }
+  .calib .body > * + * { margin-top: 16px; }
+  .meter { position: relative; height: 12px; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .meter .fill { height: 100%; width: 0; background: var(--ink-soft); opacity: .6; }
+  .meter .fill.over { background: var(--ok); opacity: 1; }
+  .meter .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); }
+  #sliders > * + * { margin-top: 18px; }
+  .slider label { display: block; }
+  .slider .hint { display: block; margin-top: 2px; }
+  .slider .row { display: flex; justify-content: space-between; gap: 12px; font-size: .9rem; font-weight: 600; }
+  .slider .row output { color: var(--ink-soft); font-variant-numeric: tabular-nums; font-weight: 400; }
+  .slider input[type=range] { width: 100%; min-height: 40px; accent-color: var(--brand); margin: 2px 0; }
   .help summary { cursor: pointer; font-weight: 600; }
   .help ul { margin: 8px 0 0; padding-left: 20px; color: var(--ink-soft); font-size: .9rem; }
   .help li + li { margin-top: 6px; }
@@ -138,14 +150,21 @@
       </div>
       <div class="live" id="live">
         <span>Ouvindo agora: <span id="hearing">—</span></span>
-        <label>Sensibilidade
-          <select id="sens">
-            <option value="1">Baixa</option>
-            <option value="2" selected>Média</option>
-            <option value="3">Alta</option>
-          </select>
-        </label>
       </div>
+      <details class="calib" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <summary>Ajustar calibração do microfone</summary>
+        <div class="body" style="padding-top:12px">
+          <div>
+            <div class="meter" id="meter" role="meter" aria-label="Volume que entra pelo microfone" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="fill" id="meterFill"></div>
+              <div class="mark" id="meterMark"></div>
+            </div>
+            <p class="hint" id="meterHint" style="margin:4px 0 0">Ligue o microfone para ver o volume em tempo real.</p>
+          </div>
+          <div id="sliders"></div>
+          <button class="btn" id="resetCalib" style="width:100%">Restaurar ajustes padrão</button>
+        </div>
+      </details>
     </section>
 
     <section class="board" id="board" aria-live="polite" aria-label="Notas tocadas">
@@ -259,6 +278,39 @@ function detectPitch(buf, sampleRate, minRms) {
 }
 
 // ---------------------------------------------------------------------------
+// Calibração: ajustes que o usuário pode mudar na tela.
+// ---------------------------------------------------------------------------
+const DEFAULT_SETTINGS = {
+  minRms: 0.02,      // volume mínimo para contar como nota
+  attackRatio: 1.5,  // quantas vezes o volume precisa subir para contar um golpe novo
+  hfRatio: 2.2,      // idem para o "estalo" do golpe (pega golpe sobre nota ainda soando)
+  minGapMs: 60,      // intervalo mínimo entre duas notas
+};
+const LIMITS = {
+  attackRatio: { min: 1.15, max: 3, step: 0.05 },
+  hfRatio: { min: 1.3, max: 4, step: 0.1 },
+  minGapMs: { min: 30, max: 250, step: 5 },
+};
+// Volume (RMS) <-> nível 0-100 em escala logarítmica, como o ouvido percebe.
+const LEVEL_FLOOR = 0.004, LEVEL_SPAN = 100;
+const levelOf = (rms) => rms > LEVEL_FLOOR ? Math.min(100, 100 * Math.log(rms / LEVEL_FLOOR) / Math.log(LEVEL_SPAN)) : 0;
+const rmsOfLevel = (lv) => LEVEL_FLOOR * LEVEL_SPAN ** (lv / 100);
+const clamp = (v, lo, hi, fallback) => (typeof v === 'number' && Number.isFinite(v)) ? Math.min(hi, Math.max(lo, v)) : fallback;
+function sanitizeSettings(raw) {
+  const o = raw && typeof raw === 'object' ? raw : {}, d = DEFAULT_SETTINGS;
+  return {
+    minRms: clamp(o.minRms, rmsOfLevel(0), rmsOfLevel(100), d.minRms),
+    attackRatio: clamp(o.attackRatio, LIMITS.attackRatio.min, LIMITS.attackRatio.max, d.attackRatio),
+    hfRatio: clamp(o.hfRatio, LIMITS.hfRatio.min, LIMITS.hfRatio.max, d.hfRatio),
+    minGapMs: clamp(o.minGapMs, LIMITS.minGapMs.min, LIMITS.minGapMs.max, d.minGapMs),
+  };
+}
+const SETTINGS_KEY = 'notas-coloridas:calibracao';
+let settings = { ...DEFAULT_SETTINGS };
+try { settings = sanitizeSettings(JSON.parse(localStorage.getItem(SETTINGS_KEY))); } catch {}
+function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} }
+
+// ---------------------------------------------------------------------------
 // Detector de notas tocadas, ouvindo o microfone.
 //
 // Cada golpe de tecla é um ataque: a energia do som dá um salto. O detector
@@ -274,21 +326,28 @@ class NoteOnsetDetector {
   static PITCH_WINDOW = 1536;
   static WAIT = 1280;        // espera após o ataque antes de ler a altura (amostras)
   static GIVE_UP = 3840;
-  static ATTACK_RATIO = 1.5; // salto de energia total
-  static HF_RATIO = 2.2;     // salto nos agudos (golpe recoloca harmônicos e "estalo")
 
-  constructor(sampleRate, minRms = 0.02) {
+  // Os limites de salto de energia (attackRatio no volume total, hfRatio nos
+  // agudos — o golpe recoloca harmônicos e "estalo") e os demais ajustes
+  // vêm de `settings`, que o usuário muda na tela.
+  constructor(sampleRate, settings = {}) {
     this.sampleRate = sampleRate;
-    this.minRms = minRms;
-    // ~60 ms sem aceitar outro ataque: cobre até ~15 notas por segundo.
-    this.refractoryHops = Math.ceil((0.06 * sampleRate) / NoteOnsetDetector.HOP);
+    this.configure({ ...DEFAULT_SETTINGS, ...settings });
     this.ring = new Float32Array(NoteOnsetDetector.RING);
     this.pitchBuf = new Float32Array(NoteOnsetDetector.PITCH_WINDOW);
     this.hearing = null; // nota MIDI soando agora (ou null)
     this.reset();
   }
 
+  /** Muda os ajustes na hora, sem reiniciar a escuta. */
+  configure(settings) {
+    this.settings = { ...this.settings, ...settings };
+    // Tempo sem aceitar outro ataque (60 ms cobre até ~15 notas por segundo).
+    this.refractoryHops = Math.max(1, Math.ceil((this.settings.minGapMs / 1000) * this.sampleRate / NoteOnsetDetector.HOP));
+  }
+
   reset() {
+    this.level = 0;
     this.ring.fill(0);
     this.pos = 0; this.hopSum = 0; this.hopSumD = 0; this.prevSample = 0; this.hopFill = 0;
     this.hopSums = []; this.hopSumsD = []; this.history = []; this.historyD = [];
@@ -315,7 +374,8 @@ class NoteOnsetDetector {
   }
 
   step(out) {
-    const { HOP, WAIT, GIVE_UP, ATTACK_RATIO, HF_RATIO } = NoteOnsetDetector;
+    const { HOP, WAIT, GIVE_UP } = NoteOnsetDetector;
+    const { minRms, attackRatio, hfRatio } = this.settings;
     this.hopSums.push(this.hopSum); this.hopSumsD.push(this.hopSumD);
     this.hopSum = 0; this.hopSumD = 0;
     if (this.hopSums.length > 4) { this.hopSums.shift(); this.hopSumsD.shift(); }
@@ -325,13 +385,14 @@ class NoteOnsetDetector {
     const sum4 = (a) => a[0] + a[1] + a[2] + a[3];
     const energy = sum4(this.hopSums) / (4 * HOP);
     const energyD = sum4(this.hopSumsD) / (4 * HOP);
-    const floor = this.minRms * this.minRms;
+    this.level = Math.sqrt(energy);
+    const floor = minRms * minRms;
     if (this.history.length >= 4) {
       const ref = Math.min(...this.history), refD = Math.min(...this.historyD);
       const prev = this.history[this.history.length - 1];
       const prevD = this.historyD[this.historyD.length - 1];
-      const rising = (energy > prev && energy > ref * ATTACK_RATIO) ||
-                     (energyD > prevD && energyD > refD * HF_RATIO);
+      const rising = (energy > prev && energy > ref * attackRatio) ||
+                     (energyD > prevD && energyD > refD * hfRatio);
       if (this.hops - this.lastOnsetHop > this.refractoryHops && energy > floor && rising) {
         this.lastOnsetHop = this.hops;
         this.pending.push({ at: this.pos, last: null });
@@ -386,7 +447,7 @@ class NoteOnsetDetector {
     if (this.pos < n) return null;
     const mask = NoteOnsetDetector.RING - 1;
     for (let i = 0; i < n; i++) this.pitchBuf[i] = this.ring[(this.pos - n + i) & mask];
-    return detectPitch(this.pitchBuf, this.sampleRate, this.minRms * minRmsFactor);
+    return detectPitch(this.pitchBuf, this.sampleRate, this.settings.minRms * minRmsFactor);
   }
 }
 
@@ -569,7 +630,6 @@ $('midiBtn').onclick = async () => {
 // Microfone
 // ---------------------------------------------------------------------------
 let micOn = false, micStream = null, micCtx = null, micNode = null;
-const MIN_RMS = [0.04, 0.02, 0.008]; // sensibilidade baixa / média / alta
 function stopMic() {
   micOn = false;
   if (micNode) { micNode.onaudioprocess = null; micNode.disconnect(); }
@@ -579,6 +639,8 @@ function stopMic() {
   setButton($('micBtn'), false);
   setStatus($('micStatus'));
   $('live').classList.remove('show');
+  updateMeter(0);
+  $('meterHint').textContent = 'Ligue o microfone para ver o volume em tempo real.';
 }
 $('micBtn').onclick = async () => {
   if (micOn) return stopMic();
@@ -598,15 +660,15 @@ $('micBtn').onclick = async () => {
   }
   micCtx = new AudioContext();
   await micCtx.resume();
-  const detector = new NoteOnsetDetector(micCtx.sampleRate);
+  const detector = new NoteOnsetDetector(micCtx.sampleRate, settings);
   const source = micCtx.createMediaStreamSource(micStream);
   // Áudio em blocos contínuos, sem lacunas: permite pegar cada golpe de uma
   // repetição rápida.
   micNode = micCtx.createScriptProcessor(512, 1, 1);
-  let lastShown;
+  let lastShown, lastMeterAt = 0;
   micNode.onaudioprocess = (e) => {
     if (!micOn) return;
-    detector.minRms = MIN_RMS[Number($('sens').value) - 1] ?? MIN_RMS[1];
+    detector.configure(settings);
     for (const midi of detector.push(e.inputBuffer.getChannelData(0))) addNote(midi);
     const midi = detector.hearing;
     if (midi !== lastShown) {
@@ -617,6 +679,8 @@ $('micBtn').onclick = async () => {
         $('hearing').innerHTML = `<span class="dot" style="background:${n.color}"></span> <b style="color:var(--ink)">${n.name}</b>`;
       }
     }
+    const now = performance.now();
+    if (now - lastMeterAt > 50) { lastMeterAt = now; updateMeter(levelOf(detector.level)); }
   };
   // O processador só roda ligado à saída; ganho zero evita o som no alto-falante.
   const mute = micCtx.createGain();
@@ -627,7 +691,56 @@ $('micBtn').onclick = async () => {
   setButton($('micBtn'), true);
   setStatus($('micStatus'), 'ok', 'Ouvindo… toque uma nota.');
   $('live').classList.add('show');
+  $('meterHint').textContent = 'Toque uma nota: a barra deve passar da marca vermelha. Ruído de fundo deve ficar antes dela.';
 };
+
+// ---------------------------------------------------------------------------
+// Painel de calibração
+// ---------------------------------------------------------------------------
+const SLIDERS = [
+  { key: 'minRms', label: 'Volume mínimo', min: 0, max: 100, step: 1,
+    get: () => levelOf(settings.minRms), set: (v) => rmsOfLevel(v), show: (v) => String(Math.round(v)),
+    hint: 'Aumente se o aparelho conta notas que você não tocou (ruído). Diminua se ele não percebe notas suaves ou distantes.' },
+  { key: 'attackRatio', label: 'Sensibilidade ao golpe', ...LIMITS.attackRatio,
+    get: () => settings.attackRatio, set: (v) => v, show: (v) => v.toFixed(2) + '×',
+    hint: 'Diminua se repetições rápidas da mesma nota não aparecem. Aumente se uma nota só gera bolinhas repetidas.' },
+  { key: 'hfRatio', label: 'Sensibilidade ao “estalo”', ...LIMITS.hfRatio,
+    get: () => settings.hfRatio, set: (v) => v, show: (v) => v.toFixed(1) + '×',
+    hint: 'Ajuda a pegar golpes sobre uma nota que ainda está soando. Diminua se ainda faltam repetições; aumente se sobram bolinhas.' },
+  { key: 'minGapMs', label: 'Intervalo mínimo entre notas', ...LIMITS.minGapMs,
+    get: () => settings.minGapMs, set: (v) => v, show: (v) => Math.round(v) + ' ms',
+    hint: 'Duas notas mais próximas que isso contam como uma. Diminua para toques muito rápidos; aumente se sobram bolinhas duplicadas.' },
+];
+function updateMeter(level) {
+  const over = level >= levelOf(settings.minRms);
+  $('meterFill').style.width = level + '%';
+  $('meterFill').classList.toggle('over', over);
+  $('meter').setAttribute('aria-valuenow', String(Math.round(level)));
+}
+function renderSliders() {
+  $('sliders').innerHTML = '';
+  for (const sl of SLIDERS) {
+    const wrap = document.createElement('div');
+    wrap.className = 'slider';
+    wrap.innerHTML = `<label><span class="row">${sl.label}<output></output></span>
+      <input type="range" min="${sl.min}" max="${sl.max}" step="${sl.step}">
+      <span class="hint"></span></label>`;
+    wrap.querySelector('.hint').textContent = sl.hint;
+    const input = wrap.querySelector('input'), out = wrap.querySelector('output');
+    input.value = sl.get();
+    out.textContent = sl.show(Number(input.value));
+    input.oninput = () => {
+      settings = { ...settings, [sl.key]: sl.set(Number(input.value)) };
+      out.textContent = sl.show(Number(input.value));
+      $('meterMark').style.left = levelOf(settings.minRms) + '%';
+      saveSettings();
+    };
+    $('sliders').appendChild(wrap);
+  }
+  $('meterMark').style.left = levelOf(settings.minRms) + '%';
+}
+$('resetCalib').onclick = () => { settings = { ...DEFAULT_SETTINGS }; saveSettings(); renderSliders(); };
+renderSliders();
 
 refresh();
 </script>

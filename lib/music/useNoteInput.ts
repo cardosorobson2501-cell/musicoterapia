@@ -1,7 +1,11 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { NoteOnsetDetector } from '@/lib/domain/notes'
+import {
+  type DetectorSettings,
+  NoteOnsetDetector,
+  levelOf,
+} from '@/lib/domain/notes'
 
 /**
  * Entradas de nota para a tela "Notas coloridas": teclado MIDI (cabo USB ou
@@ -92,26 +96,26 @@ export function useMidiInput(enabled: boolean, onNote: (midi: number) => void) {
   return status
 }
 
-// Sensibilidade 1 (baixa) a 3 (alta) → volume mínimo para contar como nota.
-const MIN_RMS = [0.04, 0.02, 0.008]
-
 /** Ouve o instrumento pelo microfone e descobre qual nota foi tocada. */
 export function useMicrophoneInput(
   enabled: boolean,
   onNote: (midi: number) => void,
-  sensitivity: number,
+  settings: DetectorSettings,
 ) {
   const [status, setStatus] = useState<InputStatus>({ state: 'off' })
   const [hearing, setHearing] = useState<number | null>(null)
+  /** Volume que entra pelo microfone (0–100), para o medidor de calibração. */
+  const [level, setLevel] = useState(0)
   const onNoteRef = useRef(onNote)
   onNoteRef.current = onNote
-  const sensitivityRef = useRef(sensitivity)
-  sensitivityRef.current = sensitivity
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
 
   useEffect(() => {
     if (!enabled) {
       setStatus({ state: 'off' })
       setHearing(null)
+      setLevel(0)
       return
     }
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -146,21 +150,28 @@ export function useMicrophoneInput(
         stream = s
         ctx = new AudioContext()
         await ctx.resume()
-        const detector = new NoteOnsetDetector(ctx.sampleRate)
+        const detector = new NoteOnsetDetector(ctx.sampleRate, settingsRef.current)
         const source = ctx.createMediaStreamSource(s)
         // Recebe o áudio em blocos contínuos, sem lacunas: é o que permite
         // pegar cada golpe de uma repetição rápida.
         processor = ctx.createScriptProcessor(512, 1, 1)
         let lastShown: number | null = null
+        let lastLevelAt = 0
         processor.onaudioprocess = (e) => {
           if (cancelled) return
-          detector.setMinRms(MIN_RMS[sensitivityRef.current - 1] ?? MIN_RMS[1])
+          detector.configure(settingsRef.current)
           for (const midi of detector.push(e.inputBuffer.getChannelData(0))) {
             onNoteRef.current(midi)
           }
           if (detector.hearing !== lastShown) {
             lastShown = detector.hearing
             setHearing(lastShown)
+          }
+          // O medidor atualiza ~20 vezes por segundo, o bastante para ver o volume.
+          const now = performance.now()
+          if (now - lastLevelAt > 50) {
+            lastLevelAt = now
+            setLevel(levelOf(detector.level))
           }
         }
         // O processador só roda se estiver ligado à saída; o ganho zero
@@ -187,10 +198,11 @@ export function useMicrophoneInput(
       stream?.getTracks().forEach((t) => t.stop())
       ctx?.close().catch(() => {})
       setHearing(null)
+      setLevel(0)
     }
   }, [enabled])
 
-  return { status, hearing }
+  return { status, hearing, level }
 }
 
 /** Toca um som curto, para o teclado da tela não ficar mudo. */

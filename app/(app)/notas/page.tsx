@@ -9,7 +9,14 @@ import {
   Trash2,
   Undo2,
 } from 'lucide-react'
-import { NOTES, midiToFrequency, noteOf, octaveOf } from '@/lib/domain/notes'
+import {
+  DEFAULT_DETECTOR_SETTINGS,
+  NOTES,
+  midiToFrequency,
+  noteOf,
+  octaveOf,
+  sanitizeSettings,
+} from '@/lib/domain/notes'
 import {
   type InputStatus,
   useMicrophoneInput,
@@ -17,8 +24,11 @@ import {
   useTonePlayer,
 } from '@/lib/music/useNoteInput'
 import { Button, Card, PageHeader, cx } from '@/components/ui'
+import { CalibrationPanel } from '@/components/notes/CalibrationPanel'
 
 type Bubble = { id: number; midi: number }
+
+const SETTINGS_KEY = 'notas-coloridas:calibracao'
 
 /**
  * Notas coloridas: cada nota tocada no teclado vira uma bolinha colorida na
@@ -29,7 +39,7 @@ export default function ColoredNotesPage() {
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [midiOn, setMidiOn] = useState(false)
   const [micOn, setMicOn] = useState(false)
-  const [sensitivity, setSensitivity] = useState(2)
+  const [settings, setSettings] = useState(DEFAULT_DETECTOR_SETTINGS)
   const [showNames, setShowNames] = useState(true)
   const [big, setBig] = useState(false)
   const nextId = useRef(0)
@@ -41,7 +51,21 @@ export default function ColoredNotesPage() {
   }, [])
 
   const midiStatus = useMidiInput(midiOn, addNote)
-  const mic = useMicrophoneInput(micOn, addNote, sensitivity)
+  const mic = useMicrophoneInput(micOn, addNote, settings)
+
+  // A calibração fica guardada neste aparelho, para não refazer a cada uso.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(SETTINGS_KEY)
+      if (saved) setSettings(sanitizeSettings(JSON.parse(saved)))
+    } catch {}
+  }, [])
+  const updateSettings = (next: typeof settings) => {
+    setSettings(next)
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
+    } catch {}
+  }
 
   useEffect(() => {
     boardEnd.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
@@ -208,20 +232,14 @@ export default function ColoredNotesPage() {
                   <span>—</span>
                 )}
               </span>
-              <label className="inline-flex items-center gap-2 text-ink-soft">
-                Sensibilidade
-                <select
-                  value={sensitivity}
-                  onChange={(e) => setSensitivity(Number(e.target.value))}
-                  className="rounded-lg border border-border bg-surface px-2 py-1 text-ink"
-                >
-                  <option value={1}>Baixa</option>
-                  <option value={2}>Média</option>
-                  <option value={3}>Alta</option>
-                </select>
-              </label>
             </div>
           )}
+          <CalibrationPanel
+            settings={settings}
+            onChange={updateSettings}
+            level={mic.level}
+            listening={micOn && mic.status.state === 'on'}
+          />
         </Card>
 
         {board}

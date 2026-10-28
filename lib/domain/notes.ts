@@ -122,6 +122,60 @@ export function detectPitch(
   return { frequency: sampleRate / period, clarity, rms }
 }
 
+/** Ajustes de calibração do microfone, pensados para o usuário mexer. */
+export type DetectorSettings = {
+  /** Volume (RMS, 0–1) abaixo do qual nada conta como nota. */
+  minRms: number
+  /** Quantas vezes o volume precisa subir para contar como novo golpe. */
+  attackRatio: number
+  /** Idem, para o "estalo" do golpe (agudos); pega golpes sobre uma nota ainda soando. */
+  hfRatio: number
+  /** Intervalo mínimo entre duas notas, em milissegundos. */
+  minGapMs: number
+}
+
+export const DEFAULT_DETECTOR_SETTINGS: DetectorSettings = {
+  minRms: 0.02,
+  attackRatio: 1.5,
+  hfRatio: 2.2,
+  minGapMs: 60,
+}
+
+/** Faixa de cada ajuste, para os controles deslizantes. */
+export const DETECTOR_LIMITS = {
+  attackRatio: { min: 1.15, max: 3, step: 0.05 },
+  hfRatio: { min: 1.3, max: 4, step: 0.1 },
+  minGapMs: { min: 30, max: 250, step: 5 },
+} as const
+
+const LEVEL_FLOOR = 0.004
+const LEVEL_SPAN = 100
+
+/** Volume (RMS) → nível 0–100 numa escala logarítmica, como o ouvido percebe. */
+export function levelOf(rms: number): number {
+  if (!(rms > LEVEL_FLOOR)) return 0
+  return Math.min(100, (100 * Math.log(rms / LEVEL_FLOOR)) / Math.log(LEVEL_SPAN))
+}
+
+/** Nível 0–100 → volume (RMS). Inverso de `levelOf`. */
+export function rmsOfLevel(level: number): number {
+  return LEVEL_FLOOR * LEVEL_SPAN ** (level / 100)
+}
+
+/** Garante que ajustes vindos de fora (ex.: guardados no aparelho) sejam válidos. */
+export function sanitizeSettings(raw: unknown): DetectorSettings {
+  const d = DEFAULT_DETECTOR_SETTINGS
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const num = (v: unknown, min: number, max: number, fallback: number) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback
+  return {
+    minRms: num(o.minRms, rmsOfLevel(0), rmsOfLevel(100), d.minRms),
+    attackRatio: num(o.attackRatio, DETECTOR_LIMITS.attackRatio.min, DETECTOR_LIMITS.attackRatio.max, d.attackRatio),
+    hfRatio: num(o.hfRatio, DETECTOR_LIMITS.hfRatio.min, DETECTOR_LIMITS.hfRatio.max, d.hfRatio),
+    minGapMs: num(o.minGapMs, DETECTOR_LIMITS.minGapMs.min, DETECTOR_LIMITS.minGapMs.max, d.minGapMs),
+  }
+}
+
 /**
  * Transforma o som contínuo do microfone em "notas tocadas".
  *
@@ -139,6 +193,10 @@ export function detectPitch(
 export class NoteOnsetDetector {
   /** Nota MIDI que está soando agora (ou null), para mostrar na tela. */
   hearing: number | null = null
+  /** Volume atual (RMS), para o medidor de calibração. */
+  level = 0
+  /** Ajustes em uso; troque com `configure`. */
+  settings: DetectorSettings
 
   private static readonly HOP = 256
   private static readonly RING = 8192
@@ -146,19 +204,17 @@ export class NoteOnsetDetector {
   /** Quanto esperar depois do ataque antes de ler a altura (amostras). */
   private static readonly WAIT = 1280
   private static readonly GIVE_UP = 3840
-  /** Salto de energia (vezes) que caracteriza um novo ataque. */
-  private static readonly ATTACK_RATIO = 1.5
-  /**
-   * Salto nos agudos (energia da diferença entre amostras). Todo golpe de
-   * tecla recoloca os harmônicos e o "estalo" do ataque, que a nota anterior
-   * já perdeu — então este sinal sobe mesmo quando o volume total quase não
-   * muda (nota nova somando com a cauda da anterior).
+  /*
+   * Os saltos de energia (`attackRatio` no volume total, `hfRatio` nos
+   * agudos) vêm dos ajustes. O sinal dos agudos é a energia da diferença
+   * entre amostras: todo golpe de tecla recoloca os harmônicos e o "estalo"
+   * do ataque, que a nota anterior já perdeu — então ele sobe mesmo quando o
+   * volume total quase não muda (nota nova somando com a cauda da anterior).
    */
-  private static readonly HF_RATIO = 2.2
 
   private readonly ring = new Float32Array(NoteOnsetDetector.RING)
   private readonly pitchBuf = new Float32Array(NoteOnsetDetector.PITCH_WINDOW)
-  private readonly refractoryHops: number
+  private refractoryHops = 0
   private pos = 0
   private hopSum = 0
   private hopFill = 0
@@ -178,14 +234,24 @@ export class NoteOnsetDetector {
 
   constructor(
     private readonly sampleRate: number,
-    private minRms = 0.02,
+    settings: Partial<DetectorSettings> = {},
   ) {
-    // ~60 ms sem aceitar outro ataque: cobre até ~15 notas por segundo.
-    this.refractoryHops = Math.ceil((0.06 * sampleRate) / NoteOnsetDetector.HOP)
+    this.settings = { ...DEFAULT_DETECTOR_SETTINGS, ...settings }
+    this.updateTimings()
   }
 
-  setMinRms(minRms: number) {
-    this.minRms = minRms
+  /** Muda os ajustes na hora, sem reiniciar a escuta. */
+  configure(settings: Partial<DetectorSettings>) {
+    this.settings = { ...this.settings, ...settings }
+    this.updateTimings()
+  }
+
+  private updateTimings() {
+    // Tempo sem aceitar outro ataque (60 ms cobre até ~15 notas por segundo).
+    this.refractoryHops = Math.max(
+      1,
+      Math.ceil((this.settings.minGapMs / 1000) * this.sampleRate / NoteOnsetDetector.HOP),
+    )
   }
 
   reset() {
@@ -207,6 +273,7 @@ export class NoteOnsetDetector {
     this.candidateCount = 0
     this.silentEvals = 0
     this.hearing = null
+    this.level = 0
   }
 
   /** Recebe um pedaço de áudio (qualquer tamanho); devolve as notas MIDI contadas. */
@@ -230,7 +297,8 @@ export class NoteOnsetDetector {
   }
 
   private step(out: number[]) {
-    const { HOP, WAIT, GIVE_UP, ATTACK_RATIO, HF_RATIO } = NoteOnsetDetector
+    const { HOP, WAIT, GIVE_UP } = NoteOnsetDetector
+    const { minRms, attackRatio, hfRatio } = this.settings
     this.hopSums.push(this.hopSum)
     this.hopSumsD.push(this.hopSumD)
     this.hopSum = 0
@@ -245,7 +313,8 @@ export class NoteOnsetDetector {
     // Energia média nos últimos ~20 ms, atualizada a cada passo.
     const energy = (this.hopSums[0] + this.hopSums[1] + this.hopSums[2] + this.hopSums[3]) / (4 * HOP)
     const energyD = (this.hopSumsD[0] + this.hopSumsD[1] + this.hopSumsD[2] + this.hopSumsD[3]) / (4 * HOP)
-    const floor = this.minRms * this.minRms
+    this.level = Math.sqrt(energy)
+    const floor = minRms * minRms
     if (this.history.length >= 4) {
       let ref = Infinity
       let refD = Infinity
@@ -254,8 +323,8 @@ export class NoteOnsetDetector {
       const prev = this.history[this.history.length - 1]
       const prevD = this.historyD[this.historyD.length - 1]
       const rising =
-        (energy > prev && energy > ref * ATTACK_RATIO) ||
-        (energyD > prevD && energyD > refD * HF_RATIO)
+        (energy > prev && energy > ref * attackRatio) ||
+        (energyD > prevD && energyD > refD * hfRatio)
       if (this.hops - this.lastOnsetHop > this.refractoryHops && energy > floor && rising) {
         this.lastOnsetHop = this.hops
         this.pending.push({ at: this.pos, last: null })
@@ -328,6 +397,6 @@ export class NoteOnsetDetector {
     if (this.pos < n) return null
     const mask = NoteOnsetDetector.RING - 1
     for (let i = 0; i < n; i++) this.pitchBuf[i] = this.ring[(this.pos - n + i) & mask]
-    return detectPitch(this.pitchBuf, this.sampleRate, this.minRms * minRmsFactor)
+    return detectPitch(this.pitchBuf, this.sampleRate, this.settings.minRms * minRmsFactor)
   }
 }

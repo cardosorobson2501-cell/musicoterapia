@@ -6,6 +6,10 @@ import {
   frequencyToMidi,
   noteOf,
   octaveOf,
+  DEFAULT_DETECTOR_SETTINGS,
+  levelOf,
+  rmsOfLevel,
+  sanitizeSettings,
 } from './notes'
 
 test('Dó é vermelho e Sol é azul, em qualquer oitava', () => {
@@ -86,7 +90,7 @@ function render(
 }
 
 function listen(signal: Float32Array, chunk = 512, minRms = 0.02) {
-  const d = new NoteOnsetDetector(SR, minRms)
+  const d = new NoteOnsetDetector(SR, { minRms })
   const got: number[] = []
   for (let i = 0; i < signal.length; i += chunk)
     got.push(...d.push(signal.subarray(i, i + chunk)))
@@ -146,4 +150,38 @@ test('segurar a nota conta uma vez só', () => {
 
 test('silêncio e ruído baixo não geram notas', () => {
   assert.deepEqual(listen(render([], 2)), [])
+})
+
+test('os ajustes mudam o comportamento do detector', () => {
+  const signal = render(seq(Array(6).fill(60), 0.12, undefined, true), 1.5)
+  // Volume mínimo alto demais: nada conta.
+  assert.deepEqual(listen(signal, 512, 0.9), [])
+  // Intervalo mínimo longo demais: só pega parte dos golpes.
+  const d = new NoteOnsetDetector(SR, { minGapMs: 250 })
+  const got: number[] = []
+  for (let i = 0; i < signal.length; i += 512) got.push(...d.push(signal.subarray(i, i + 512)))
+  assert.ok(got.length > 0 && got.length < 6, `contou ${got.length}`)
+  // Trocar o ajuste durante a escuta tem efeito imediato.
+  d.reset()
+  d.configure({ minGapMs: 60 })
+  const again: number[] = []
+  for (let i = 0; i < signal.length; i += 512) again.push(...d.push(signal.subarray(i, i + 512)))
+  assert.equal(again.length, 6)
+})
+
+test('medidor: nível e volume são inversos e o detector informa o volume', () => {
+  assert.equal(levelOf(0), 0)
+  assert.ok(Math.abs(rmsOfLevel(levelOf(0.02)) - 0.02) < 1e-9)
+  const d = new NoteOnsetDetector(SR)
+  d.push(render([{ t: 0, midi: 60 }], 0.3, 2))
+  assert.ok(d.level > 0.1, `volume ${d.level}`)
+})
+
+test('ajustes inválidos guardados no aparelho viram valores seguros', () => {
+  assert.deepEqual(sanitizeSettings(null), DEFAULT_DETECTOR_SETTINGS)
+  assert.deepEqual(sanitizeSettings({ minRms: 'x', attackRatio: 99, hfRatio: -1, minGapMs: NaN }), {
+    ...DEFAULT_DETECTOR_SETTINGS,
+    attackRatio: 3,
+    hfRatio: 1.3,
+  })
 })
